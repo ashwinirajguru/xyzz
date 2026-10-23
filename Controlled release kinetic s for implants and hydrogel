@@ -1,0 +1,104 @@
+"""
+Controlled-release kinetics for implants and hydrogels.
+
+Fits four classic release models to cumulative release data (Mt/Minf vs time),
+compares them, and reports the Korsmeyer-Peppas release mechanism.
+
+Models (F = fraction released, t = time):
+    Zero-order        F = k0 * t               (constant rate, e.g. reservoir implants)
+    First-order       F = 1 - exp(-k1 * t)     (rate proportional to remaining drug)
+    Higuchi           F = kH * sqrt(t)         (diffusion from a matrix / slab)
+    Korsmeyer-Peppas  F = k * t^n              (hydrogels; n reveals the mechanism)
+
+Requires: numpy, scipy, matplotlib
+"""
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+
+
+# ---------------------------------------------------------------- models
+def zero_order(t, k0):
+    return np.clip(k0 * t, 0, 1)
+
+
+def first_order(t, k1):
+    return 1 - np.exp(-k1 * t)
+
+
+def higuchi(t, kH):
+    return np.clip(kH * np.sqrt(t), 0, 1)
+
+
+def korsmeyer_peppas(t, k, n):
+    return np.clip(k * t**n, 0, 1)
+
+
+# name -> (function, initial guess, bounds, time to 50% release)
+MODELS = {
+    "Zero-order":       (zero_order,       [0.02],       ([0], [np.inf]),
+                         lambda p: 0.5 / p[0]),
+    "First-order":      (first_order,      [0.05],       ([0], [np.inf]),
+                         lambda p: np.log(2) / p[0]),
+    "Higuchi":          (higuchi,          [0.1],        ([0], [np.inf]),
+                         lambda p: (0.5 / p[0]) ** 2),
+    "Korsmeyer-Peppas": (korsmeyer_peppas, [0.1, 0.5],   ([0, 0], [np.inf, 2]),
+                         lambda p: (0.5 / p[0]) ** (1 / p[1])),
+}
+
+
+def r_squared(y, y_fit):
+    ss_res = np.sum((y - y_fit) ** 2)
+    ss_tot = np.sum((y - np.mean(y)) ** 2)
+    return 1 - ss_res / ss_tot
+
+
+def interpret_n(n):
+    """Mechanism for a thin-film hydrogel (slab geometry)."""
+    if n <= 0.5:
+        return "Fickian diffusion"
+    if n < 1.0:
+        return "anomalous transport (diffusion + polymer relaxation/swelling)"
+    return "Case-II / swelling-controlled transport"
+
+
+# ------------------------------------------------------- synthetic "experiment"
+rng = np.random.default_rng(42)
+t_data = np.array([0.5, 1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48])   # hours
+true_k, true_n = 0.10, 0.62                                        # hidden "truth"
+F_data = korsmeyer_peppas(t_data, true_k, true_n) + rng.normal(0, 0.015, t_data.size)
+F_data = np.clip(F_data, 0, 1)
+
+# Korsmeyer-Peppas is only valid for the first ~60% of release, so fit that range
+mask = F_data <= 0.6
+t_fit, F_fit = t_data[mask], F_data[mask]
+
+# ---------------------------------------------------------------- fitting
+results = {}
+print(f"{'Model':<18}{'Parameters':<28}{'R^2':>8}{'t50 (h)':>10}")
+print("-" * 64)
+for name, (func, p0, bounds, t50) in MODELS.items():
+    popt, _ = curve_fit(func, t_fit, F_fit, p0=p0, bounds=bounds)
+    r2 = r_squared(F_fit, func(t_fit, *popt))
+    results[name] = popt
+    params = ", ".join(f"{p:.4f}" for p in popt)
+    print(f"{name:<18}{params:<28}{r2:>8.4f}{t50(popt):>10.1f}")
+
+k_fit, n_fit = results["Korsmeyer-Peppas"]
+print(f"\nKorsmeyer-Peppas exponent n = {n_fit:.2f} -> {interpret_n(n_fit)}")
+
+# ------------------------------------------------------------------- plot
+t_curve = np.linspace(0.01, 48, 400)
+fig, ax = plt.subplots(figsize=(8, 5))
+ax.scatter(t_data, F_data, color="black", zorder=5, label="Experimental data")
+for name, (func, *_rest) in MODELS.items():
+    ax.plot(t_curve, func(t_curve, *results[name]), label=name)
+ax.axvspan(0, t_fit.max(), color="grey", alpha=0.08, label="Fit range (F ≤ 0.6)")
+ax.set_ylim(0, 1.05)
+ax.set_xlabel("Time (h)")
+ax.set_ylabel("Fraction of drug released (Mt/M∞)")
+ax.set_title("Controlled-release kinetics: model comparison")
+ax.legend()
+fig.tight_layout()
+fig.savefig("release_kinetics.png", dpi=150)
+plt.show()
